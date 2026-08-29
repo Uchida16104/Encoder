@@ -1,0 +1,267 @@
+{% load static %}
+<!doctype html>
+<html lang="ja" x-data="encoderApp()" x-init="init()" :class="darkMode ? 'dark' : ''">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Encoder - CSV/SQL/Text character encoding inspection, preview and conversion.">
+  <title>Encoder — Character Encoding Converter</title>
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = { darkMode: 'class' };
+  </script>
+
+  <script src="https://unpkg.com/htmx.org@2.0.6"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js"></script>
+  <script src="https://unpkg.com/hyperscript.org@0.9.14"></script>
+  <script src="https://cdn.jsdelivr.net/npm/motion@12.23.12/dist/motion.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.13.0/sql-wasm.js"></script>
+  <link rel="stylesheet" href="https://pyscript.net/releases/2025.8.1/core.css">
+  <script type="module" src="https://pyscript.net/releases/2025.8.1/core.js"></script>
+
+  <style>
+    [x-cloak] { display:none!important; }
+    textarea { tab-size: 2; }
+    .glass { backdrop-filter: blur(18px); background: rgba(255,255,255,.78); }
+    .dark .glass { background: rgba(15,23,42,.76); }
+  </style>
+</head>
+<body class="min-h-screen bg-slate-100 text-slate-900 dark:bg-slate-950 dark:text-slate-100 transition-colors">
+  <header class="sticky top-0 z-40 border-b border-slate-200 dark:border-slate-800 glass">
+    <div class="mx-auto max-w-7xl px-4 py-4 flex items-center justify-between gap-4">
+      <div>
+        <div class="flex items-center gap-2">
+          <span class="text-2xl font-black tracking-tight">Encoder</span>
+          <span class="rounded-full bg-slate-900 px-2.5 py-1 text-xs font-bold text-white dark:bg-white dark:text-slate-900">v1.0</span>
+        </div>
+        <p class="text-xs text-slate-500 dark:text-slate-400">CSV / SQL / Text • Inspect • Preview • Convert • Export</p>
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="hidden sm:inline text-xs text-slate-500" x-text="status"></span>
+        <button @click="darkMode=!darkMode" class="rounded-xl border px-3 py-2 text-sm hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Toggle dark mode">
+          <span x-text="darkMode ? '☀️' : '🌙'"></span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-7xl px-4 py-6 space-y-6">
+    <section class="grid lg:grid-cols-[1.05fr_.95fr] gap-6">
+      <div class="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+        <div class="flex items-center justify-between gap-4 mb-5">
+          <div>
+            <h1 class="text-xl font-bold">1. ファイルを読み込む</h1>
+            <p class="text-sm text-slate-500 dark:text-slate-400">サーバー上で文字コードを自動推定し、変換可能な形式を判定します。</p>
+          </div>
+          <span class="rounded-full px-3 py-1 text-xs font-semibold bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">最大 10 MiB</span>
+        </div>
+
+        <form id="inspect-form" class="space-y-4" @submit.prevent="inspect()">
+          {% csrf_token %}
+          <label for="file" class="block cursor-pointer rounded-2xl border-2 border-dashed border-slate-300 p-7 text-center hover:border-slate-500 dark:border-slate-700 dark:hover:border-slate-500">
+            <div class="text-4xl mb-2">⇪</div>
+            <div class="font-semibold">CSV / SQL / TXT を選択</div>
+            <div class="text-xs text-slate-500 mt-1" x-text="file ? file.name : 'クリックしてファイルを選択'">クリックしてファイルを選択</div>
+            <input id="file" name="file" type="file" class="hidden" @change="onFile($event)">
+          </label>
+          <div class="grid grid-cols-2 gap-3">
+            <button type="submit" :disabled="!file || busy" class="rounded-xl bg-slate-900 px-4 py-3 font-semibold text-white disabled:opacity-40 dark:bg-white dark:text-slate-900">自動解析</button>
+            <button type="button" @click="resetAll()" class="rounded-xl border px-4 py-3 font-semibold hover:bg-slate-50 dark:hover:bg-slate-800">リセット</button>
+          </div>
+        </form>
+
+        <div class="mt-6 grid sm:grid-cols-2 gap-3 text-sm" x-cloak x-show="result">
+          <div class="rounded-xl bg-slate-50 p-4 dark:bg-slate-950/70"><div class="text-xs text-slate-500">推定文字コード</div><div class="font-mono font-bold mt-1" x-text="result?.detected_encoding || '-'">-</div></div>
+          <div class="rounded-xl bg-slate-50 p-4 dark:bg-slate-950/70"><div class="text-xs text-slate-500">信頼度</div><div class="font-bold mt-1" x-text="result ? Math.round(result.confidence*100)+'%' : '-'">-</div></div>
+          <div class="rounded-xl bg-slate-50 p-4 dark:bg-slate-950/70"><div class="text-xs text-slate-500">形式</div><div class="font-bold mt-1 uppercase" x-text="result?.file_type || '-'">-</div></div>
+          <div class="rounded-xl bg-slate-50 p-4 dark:bg-slate-950/70"><div class="text-xs text-slate-500">サイズ</div><div class="font-bold mt-1" x-text="result ? formatBytes(result.size) : '-'">-</div></div>
+        </div>
+
+        <div x-cloak x-show="error" class="mt-5 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:border-rose-950 dark:bg-rose-950/30 dark:text-rose-300" x-text="error"></div>
+      </div>
+
+      <div class="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+        <h2 class="text-xl font-bold">2. 変換設定</h2>
+        <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">入力は自動判定またはPython codec名、出力もPython codec名を指定できます。</p>
+        <div class="mt-5 space-y-4">
+          <div>
+            <label class="block text-sm font-semibold mb-2">入力文字コード</label>
+            <input x-model="sourceEncoding" list="encodings" class="w-full rounded-xl border px-4 py-3 bg-white dark:bg-slate-950 dark:border-slate-700" placeholder="auto / utf-8 / cp932 ...">
+          </div>
+          <div>
+            <label class="block text-sm font-semibold mb-2">出力文字コード</label>
+            <input x-model="targetEncoding" list="encodings" class="w-full rounded-xl border px-4 py-3 bg-white dark:bg-slate-950 dark:border-slate-700" placeholder="utf-8">
+          </div>
+          <div>
+            <label class="block text-sm font-semibold mb-2">表現できない文字への対応</label>
+            <select x-model="errorPolicy" class="w-full rounded-xl border px-4 py-3 bg-white dark:bg-slate-950 dark:border-slate-700">
+              <option value="strict">strict — エラーにする</option>
+              <option value="replace">replace — 置換する</option>
+              <option value="ignore">ignore — 捨てる</option>
+              <option value="backslashreplace">backslashreplace — エスケープする</option>
+            </select>
+          </div>
+          <button @click="convert()" :disabled="!file || busy" class="w-full rounded-xl bg-emerald-600 px-4 py-3 font-bold text-white disabled:opacity-40 hover:bg-emerald-700">変換してエクスポート</button>
+        </div>
+        <div class="mt-5 rounded-xl bg-slate-50 p-4 text-xs leading-6 dark:bg-slate-950/70">
+          <div class="font-semibold mb-1">対応方針</div>
+          <div>Pythonのcodec登録簿に存在するエンコーディング名を直接入力できます。検出はBOM、厳密デコード、charset-normalizerを組み合わせています。</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden dark:border-slate-800 dark:bg-slate-900">
+      <div class="border-b border-slate-200 dark:border-slate-800 px-6 py-4 flex items-center justify-between">
+        <div><h2 class="text-xl font-bold">3. プレビュー</h2><p class="text-sm text-slate-500 dark:text-slate-400">変換前のデコード結果です。</p></div>
+        <span x-show="result?.preview?.truncated" x-cloak class="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-700">プレビューを40,000文字に制限</span>
+      </div>
+      <div class="p-6">
+        <div x-show="!result" class="py-16 text-center text-slate-400">ファイルを解析するとここにプレビューが表示されます。</div>
+        <div x-show="result?.file_type === 'csv'" x-cloak>
+          <div class="overflow-auto rounded-xl border dark:border-slate-700">
+            <table class="min-w-full text-sm">
+              <tbody>
+                <template x-for="(row, r) in (result?.csv?.rows || [])" :key="r">
+                  <tr class="border-b last:border-0 dark:border-slate-800">
+                    <template x-for="(cell, c) in row" :key="c">
+                      <td class="px-3 py-2 whitespace-pre-wrap align-top" :class="r===0 && result.csv.has_header ? 'font-bold bg-slate-50 dark:bg-slate-950' : ''" x-text="cell"></td>
+                    </template>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+          <div class="mt-3 text-xs text-slate-500">区切り文字: <span class="font-mono" x-text="JSON.stringify(result?.csv?.delimiter || '')"></span></div>
+        </div>
+        <pre x-show="result && result.file_type !== 'csv'" x-cloak class="max-h-[520px] overflow-auto rounded-xl bg-slate-950 p-5 text-sm leading-6 text-slate-100 whitespace-pre-wrap break-words" x-text="result?.preview?.text || ''"></pre>
+      </div>
+    </section>
+
+    <section class="grid lg:grid-cols-2 gap-6">
+      <div class="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+        <h2 class="font-bold text-lg">ブラウザ内データベース検証</h2>
+        <p class="mt-1 text-sm text-slate-500">sql.jsでUTF-8化したSQLをブラウザ上で検証できる任意機能です。サーバーDBへ保存はしません。</p>
+        <div class="mt-4 grid grid-cols-2 gap-3">
+          <button @click="runSqlPreview()" class="rounded-xl border px-4 py-3 font-semibold">SQLを実行</button>
+          <button @click="clearSql()" class="rounded-xl border px-4 py-3 font-semibold">結果を消去</button>
+        </div>
+        <pre class="mt-4 max-h-72 overflow-auto rounded-xl bg-slate-950 p-4 text-xs text-slate-100" x-text="sqlResult || 'SQLファイルを読み込んで実行できます。'"></pre>
+      </div>
+
+      <div class="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+        <h2 class="font-bold text-lg">PyScript / Motion / HTMX</h2>
+        <p class="mt-1 text-sm text-slate-500">指定スタックをUI層に統合しています。PyScriptはクライアント側のメタデータ表示、Motion Oneはアニメーション、HTMXは将来の部分更新に使用できます。</p>
+        <div id="pyscript-state" class="mt-4 rounded-xl bg-slate-50 p-4 text-sm dark:bg-slate-950/70">PyScript 初期化中…</div>
+        <div class="mt-4 rounded-xl border border-dashed p-4 text-xs text-slate-500" hx-get="/health/" hx-trigger="load" hx-swap="none">HTMX health check</div>
+      </div>
+    </section>
+  </main>
+
+  <datalist id="encodings">
+    {% for enc in common_encodings %}<option value="{{ enc }}"></option>{% endfor %}
+  </datalist>
+
+  <script>
+    function encoderApp() {
+      return {
+        file: null,
+        result: null,
+        error: '',
+        status: 'Ready',
+        busy: false,
+        darkMode: window.matchMedia('(prefers-color-scheme: dark)').matches,
+        sourceEncoding: 'auto',
+        targetEncoding: 'utf-8',
+        errorPolicy: 'strict',
+        sqlResult: '',
+        init() {
+          this.$nextTick(() => {
+            if (window.Motion?.animate) {
+              Motion.animate('main section', { opacity: [0, 1], y: [10, 0] }, { duration: .35, delay: .05 });
+            }
+          });
+        },
+        onFile(event) {
+          this.file = event.target.files?.[0] || null;
+          this.result = null;
+          this.error = '';
+          this.status = this.file ? `${this.file.name} selected` : 'Ready';
+        },
+        csrf() {
+          return document.querySelector('input[name=csrfmiddlewaretoken]')?.value || '';
+        },
+        async inspect() {
+          if (!this.file) return;
+          this.busy = true; this.error = ''; this.status = 'Analyzing…';
+          const fd = new FormData(); fd.append('file', this.file); fd.append('csrfmiddlewaretoken', this.csrf());
+          try {
+            const res = await fetch('/api/inspect/', { method: 'POST', body: fd, headers: {'X-CSRFToken': this.csrf()} });
+            const data = await res.json();
+            if (!res.ok || !data.ok) throw new Error(data.error || '解析に失敗しました。');
+            this.result = data;
+            this.sourceEncoding = data.detected_encoding || 'auto';
+            this.status = `Detected ${data.detected_encoding}`;
+          } catch (e) { this.error = e.message; this.status = 'Error'; }
+          finally { this.busy = false; }
+        },
+        async convert() {
+          if (!this.file) return;
+          this.busy = true; this.error = ''; this.status = 'Converting…';
+          const fd = new FormData();
+          fd.append('file', this.file);
+          fd.append('source_encoding', this.sourceEncoding || 'auto');
+          fd.append('target_encoding', this.targetEncoding || 'utf-8');
+          fd.append('errors', this.errorPolicy);
+          fd.append('csrfmiddlewaretoken', this.csrf());
+          try {
+            const res = await fetch('/api/convert/', { method: 'POST', body: fd, headers: {'X-CSRFToken': this.csrf()} });
+            if (!res.ok) {
+              const data = await res.json().catch(() => ({}));
+              throw new Error(data.error || '変換に失敗しました。');
+            }
+            const blob = await res.blob();
+            const disposition = res.headers.get('Content-Disposition') || '';
+            const match = disposition.match(/filename="?([^";]+)"?/i);
+            const name = match ? match[1] : `${this.file.name}.converted`;
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a'); a.href = url; a.download = name; a.click();
+            setTimeout(() => URL.revokeObjectURL(url), 1500);
+            this.status = `${res.headers.get('X-Encoder-Target') || this.targetEncoding} exported`;
+          } catch (e) { this.error = e.message; this.status = 'Error'; }
+          finally { this.busy = false; }
+        },
+        async runSqlPreview() {
+          if (!this.result || this.result.file_type !== 'sql') {
+            this.sqlResult = 'SQLファイルを先に読み込んでください。'; return;
+          }
+          try {
+            const SQL = await initSqlJs({ locateFile: f => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.13.0/${f}` });
+            const source = this.result.preview.text;
+            const db = new SQL.Database();
+            db.run(source);
+            const tables = db.exec("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name");
+            this.sqlResult = JSON.stringify(tables, null, 2) || '実行成功（テーブルなし）';
+          } catch (e) { this.sqlResult = `SQL実行エラー: ${e.message}`; }
+        },
+        clearSql() { this.sqlResult = ''; },
+        resetAll() {
+          this.file = null; this.result = null; this.error = ''; this.status = 'Ready'; this.sourceEncoding='auto'; this.targetEncoding='utf-8'; this.sqlResult='';
+          const input = document.getElementById('file'); if (input) input.value='';
+        },
+        formatBytes(n) {
+          if (n < 1024) return `${n} B`; if (n < 1024**2) return `${(n/1024).toFixed(1)} KiB`; return `${(n/1024**2).toFixed(2)} MiB`;
+        }
+      };
+    }
+  </script>
+
+  <script type="py" src="{% static 'pyscript/encoder.py' %}?v=20260829-v2"></script>
+  <script>
+    window.addEventListener('load', () => {
+      const node = document.getElementById('pyscript-state');
+      if (node) node.textContent = 'PyScript enabled • browser-side Python module configured';
+    });
+  </script>
+</body>
+</html>
