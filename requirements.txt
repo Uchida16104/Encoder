@@ -1,0 +1,2 @@
+Django>=5.2,<6.1
+charset-normalizer>=3.4,<4
